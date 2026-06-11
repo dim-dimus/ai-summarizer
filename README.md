@@ -48,7 +48,9 @@ QUEUE_CONNECTION=database
 # SQS_QUEUE=summaries
 
 # LLM (provider-agnostic client)
-LLM_PROVIDER=anthropic         # anthropic | gemini | ...
+LLM_PROVIDER=anthropic         # anthropic | fake | gemini | ...
+                               # 'fake' returns canned summaries — runs the full
+                               # async pipeline locally with NO API key or cost.
 ANTHROPIC_API_KEY=             # from Anthropic Console (NOT a claude.ai Pro account)
 ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 # Optional free-tier fallback:
@@ -73,24 +75,29 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ## Local development
 
 ```bash
-# 1. Start backend + database
-docker compose up -d
+# 1. Start api + postgres + worker (the worker runs `queue:work` as its own service)
+cp api/.env.example api/.env          # then set APP_KEY (step 2) and any secrets
+docker compose up -d --build
 
-# 2. Backend setup
-docker compose exec api composer install
+# 2. Backend setup (deps are baked into the image; key+migrate are still needed)
 docker compose exec api php artisan key:generate
 docker compose exec api php artisan migrate --seed
 
-# 3. Run the queue worker (separate terminal)
-docker compose exec api php artisan queue:work
-
-# 4. Frontend
-cd web
-npm install
-npm run dev
+# 3. Frontend
+cp web/.env.local.example web/.env.local
+cd web && npm install && npm run dev
 ```
 
 App: http://localhost:3000 · API: http://localhost:8000
+
+> The `worker` container runs `php artisan queue:work` automatically. After changing
+> `api/.env`, recreate the containers (`docker compose up -d --force-recreate`) so the
+> new env is picked up — `restart` alone keeps the old env. To run a worker manually
+> instead, use `docker compose exec api php artisan queue:work`.
+
+Seeded logins: `admin@example.com` / `password` (admin) and `test@example.com` / `password`.
+With `LLM_PROVIDER=fake` (the keyless default for local dev) summaries complete instantly
+with canned text; set `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` for real summaries.
 
 ## Production (AWS) — high level
 

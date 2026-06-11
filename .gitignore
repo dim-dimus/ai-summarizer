@@ -1,0 +1,16 @@
+cat > /Users/dmytroodulo/testing/ai-summarizer/.gitignore <<'EOF'
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc local scratch
+*.local
+
+# Note: api/ and web/ each ship their own .gitignore
+# (vendor/, node_modules/, .env, .next/, etc. are handled there).
+EOF
