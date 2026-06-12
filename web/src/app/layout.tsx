@@ -2,7 +2,10 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
+import { ToastProvider } from "@/lib/toast";
+import { ConfirmProvider } from "@/lib/confirm";
 import { NavBar } from "@/components/NavBar";
+import { ToastContainer } from "@/components/ToastContainer";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,12 +33,17 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <AuthProvider>
-          <NavBar />
-          <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8">
-            {children}
-          </main>
-        </AuthProvider>
+        <ConfirmProvider>
+          <ToastProvider>
+            <AuthProvider>
+              <NavBar />
+              <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8">
+                {children}
+              </main>
+            </AuthProvider>
+            <ToastContainer />
+          </ToastProvider>
+        </ConfirmProvider>
       </body>
     </html>
   );

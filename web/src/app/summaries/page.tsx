@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, ApiRequestError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/lib/toast";
+import { useConfirm } from "@/lib/confirm";
 import type { SourceType, Summary, SummaryStyle } from "@/lib/types";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -17,12 +19,30 @@ const STYLES: { value: SummaryStyle; label: string }[] = [
 export default function SummariesPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const { show } = useToast();
   const [summaries, setSummaries] = useState<Summary[]>([]);
   const [listLoading, setListLoading] = useState(true);
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevSummaries = useRef<Summary[]>([]);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [user, loading, router]);
+
+  // Detect status changes and show notifications
+  useEffect(() => {
+    summaries.forEach((current) => {
+      const prev = prevSummaries.current.find((s) => s.id === current.id);
+      if (
+        prev &&
+        prev.status !== "completed" &&
+        current.status === "completed"
+      ) {
+        show(`Summary #${current.id} completed.`, "success");
+      }
+    });
+    prevSummaries.current = summaries;
+  }, [summaries, show]);
 
   const refresh = useCallback(async () => {
     try {
@@ -34,7 +54,12 @@ export default function SummariesPage() {
   }, []);
 
   useEffect(() => {
-    if (user) refresh();
+    if (!user) return;
+    refresh();
+    pollTimer.current = setInterval(refresh, 3000);
+    return () => {
+      if (pollTimer.current) clearInterval(pollTimer.current);
+    };
   }, [user, refresh]);
 
   if (loading || !user) return null;
@@ -178,9 +203,16 @@ function SummaryRow({
   onDeleted: () => void;
 }) {
   const [deleting, setDeleting] = useState(false);
+  const { show } = useConfirm();
 
   async function handleDelete() {
-    if (!confirm("Delete this summary?")) return;
+    const confirmed = await show({
+      title: "Delete summary?",
+      message: "This action cannot be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+    });
+    if (!confirmed) return;
     setDeleting(true);
     try {
       await api.deleteSummary(summary.id);
@@ -197,7 +229,8 @@ function SummaryRow({
           {summary.title ?? summary.source_url ?? `Summary #${summary.id}`}
         </span>
         <span className="text-xs text-black/50 dark:text-white/50">
-          {summary.style} · {new Date(summary.created_at).toLocaleString()}
+          {summary.model ?? "—"} · {summary.style} ·{" "}
+          {new Date(summary.created_at).toLocaleString()}
         </span>
       </Link>
       <StatusBadge status={summary.status} />
