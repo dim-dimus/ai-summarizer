@@ -68,15 +68,36 @@ Create `api/Dockerfile.prod`:
 
 ```dockerfile
 FROM php:8.3-cli-alpine
-RUN apk add --no-cache postgresql-client zip unzip
+RUN apk add --no-cache postgresql-client postgresql-dev zip unzip
+RUN docker-php-ext-install pdo_pgsql
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /app
 COPY . .
-RUN composer install --no-dev --optimize-autoloader
-RUN php artisan config:cache && php artisan route:cache
+RUN composer install --optimize-autoloader
 EXPOSE 8000
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
 ```
+
+**Notes on this Dockerfile:**
+- `pdo_pgsql` is required for PostgreSQL connections (RDS).
+- `composer install` runs **without** `--no-dev` because the AWS SDK (`aws/aws-sdk-php`, needed for SQS) and other runtime packages must be present. Make sure `aws/aws-sdk-php` is in the `require` section of `composer.json` (run `composer require aws/aws-sdk-php` locally first).
+- **Do not** run `php artisan config:cache` in the image — it bakes config at build time and ignores runtime env vars.
+
+### 1.1.1 Create `.dockerignore` (critical)
+
+Create `api/.dockerignore` so your **local dev `.env` is never baked into the image**:
+
+```
+.env
+.env.*
+vendor
+node_modules
+storage/logs/*
+.git
+tests
+```
+
+> **Why this matters:** Your local `api/.env` has `DB_HOST=postgres` (for docker-compose). Without `.dockerignore`, `COPY . .` copies that file into the image and the container connects to the wrong host. The production `.env` is supplied at runtime via a bind-mount (see Step 9).
 
 ### 1.2 Build and test locally
 
@@ -400,9 +421,14 @@ docker pull 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
 
 ## Step 9: Configure Environment & Run Containers
 
-### 9.1 Create .env for Containers
+### 9.1 Create Environment File
 
-Create a file `/home/ec2-user/.env.prod` on the EC2 instance:
+The production config lives in a single file on the EC2 host: `~/.env.prod`. The containers
+**bind-mount** this file as their `/app/.env` (read-only) at runtime — so the host file is the
+single source of truth. You don't copy anything into the image, and you don't rebuild when a
+secret changes: edit `~/.env.prod` and `docker restart api worker`.
+
+Create `/home/ec2-user/.env.prod` on the EC2 instance:
 
 ```bash
 cat > ~/.env.prod << 'EOF'
@@ -439,6 +465,12 @@ FRONTEND_URL=http://localhost:3000
 EOF
 ```
 
+**How it works:**
+- Each container is started with `-v ~/.env.prod:/app/.env:ro` — the host file is mounted directly as the app's `.env`.
+- `:ro` makes it read-only inside the container (the app can't modify it).
+- **No copying, no entrypoint script, no rebuild on config change** — edit `~/.env.prod`, then `docker restart api worker`.
+- This works only because `.dockerignore` (Step 1.1.1) keeps a stale `.env` out of the image; otherwise the baked-in copy would shadow the mount.
+
 **Important:** Replace `FRONTEND_URL` with your actual frontend URL after Step 11 (when you deploy to Amplify and get a free domain like `https://dxxxxx.amplifyapp.com`). For now, use `localhost:3000` as a placeholder.
 
 **Get your `APP_KEY`** from your local `.env`:
@@ -449,13 +481,13 @@ grep "APP_KEY=" /Users/dmytroodulo/testing/ai-summarizer/api/.env
 
 ### 9.2 Run API Container
 
-On EC2:
+On EC2 (note the `-v ~/.env.prod:/app/.env:ro` mount):
 ```bash
 docker run -d \
   --name api \
   -p 8000:8000 \
   --restart unless-stopped \
-  --env-file ~/.env.prod \
+  -v ~/.env.prod:/app/.env:ro \
   123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
 
 # Check logs
@@ -468,7 +500,7 @@ docker logs api
 docker run -d \
   --name worker \
   --restart unless-stopped \
-  --env-file ~/.env.prod \
+  -v ~/.env.prod:/app/.env:ro \
   123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest \
   php artisan queue:work sqs --tries=3 --backoff=10 --timeout=120
 
@@ -481,6 +513,9 @@ docker logs worker
 ```bash
 docker ps
 # Should show both 'api' and 'worker' containers
+
+# Confirm the containers see the correct DB host (NOT "postgres")
+docker exec api grep DB_HOST /app/.env
 ```
 
 ---
@@ -709,6 +744,58 @@ aws ec2 describe-security-groups \
   --group-ids YOUR_SG_ID \
   --region us-east-1
 ```
+
+### App connects to host "postgres" instead of RDS
+
+**Error:**
+```
+SQLSTATE[08006] [7] could not translate host name "postgres" to address
+```
+
+**Cause:** A stale `.env` (with `DB_HOST=postgres` from local docker-compose) was baked into the
+image, shadowing your production config.
+
+**Fix:**
+1. Ensure `api/.dockerignore` exists and lists `.env` and `.env.*` (Step 1.1.1), then rebuild + push.
+2. Run containers with the bind-mount: `-v ~/.env.prod:/app/.env:ro` (Step 9.2 / 9.3).
+3. Verify inside the container:
+```bash
+docker exec api grep DB_HOST /app/.env   # must show your RDS endpoint, not "postgres"
+```
+
+---
+
+## Redeploying After a Code Change
+
+When you change application code (not just config), rebuild and push the image, then recreate
+the containers on EC2.
+
+**Local machine:**
+```bash
+cd /Users/dmytroodulo/testing/ai-summarizer
+docker build -f api/Dockerfile.prod \
+  -t 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest \
+  --platform linux/amd64 api/
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
+```
+
+**EC2:**
+```bash
+docker pull 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
+docker stop api worker && docker rm api worker
+
+docker run -d --name api -p 8000:8000 --restart unless-stopped \
+  -v ~/.env.prod:/app/.env:ro \
+  123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
+
+docker run -d --name worker --restart unless-stopped \
+  -v ~/.env.prod:/app/.env:ro \
+  123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest \
+  php artisan queue:work sqs --tries=3 --backoff=10 --timeout=120
+```
+
+> **Config-only change** (editing a secret or host in `~/.env.prod`)? No rebuild needed —
+> just `docker restart api worker`.
 
 ### Frontend shows "API unreachable"
 
