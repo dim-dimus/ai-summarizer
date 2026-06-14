@@ -21,6 +21,15 @@ docker --version
 git --version
 ```
 
+**Shell note:** If using zsh or bash, always **quote AWS CLI `--query` parameters** with single quotes to prevent shell expansion:
+```bash
+# ✓ Correct
+aws ec2 describe-addresses --query 'Addresses[0].PublicIp'
+
+# ✗ Wrong (zsh/bash will fail)
+aws ec2 describe-addresses --query Addresses[0].PublicIp
+```
+
 ---
 
 ## Architecture (Free Tier Only)
@@ -71,13 +80,25 @@ CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
 
 ### 1.2 Build and test locally
 
+Build for **linux/amd64** (required for EC2, even on Mac with Apple Silicon):
+
 ```bash
 cd /Users/dmytroodulo/testing/ai-summarizer
 docker context use colima
-docker build -f api/Dockerfile.prod -t summarizer-api:latest api/
+
+# Build for linux/amd64 (EC2 architecture)
+docker build \
+  -f api/Dockerfile.prod \
+  -t summarizer-api:latest \
+  --platform linux/amd64 \
+  api/
+
+# Test it
 docker run -it summarizer-api:latest php artisan --version
 # Should output: Laravel Framework 11.x.x
 ```
+
+**Important:** Always include `--platform linux/amd64` when building on Mac, even if you're on Apple Silicon. EC2 instances use x86_64 architecture.
 
 ---
 
@@ -142,16 +163,18 @@ aws ecr get-login-password --region us-east-1 | \
   docker login --username AWS --password-stdin \
   123456789.dkr.ecr.us-east-1.amazonaws.com
 
-# Tag your image
+# Tag your image (already tagged during build, but you can re-tag if needed)
 docker tag summarizer-api:latest \
   123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
 
 # Push to ECR
 docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
 
-# Verify
-aws ecr list-images --repository-name summarizer-api --region us-east-1
+# Verify push succeeded
+aws ecr list-images --repository-name summarizer-api --region us-east-1 --query 'imageIds[*].imageTag' --output text
 ```
+
+**Troubleshooting:** If you get "no matching manifest for linux/amd64", rebuild the image with `--platform linux/amd64` flag (see Step 1.2).
 
 ---
 
@@ -161,7 +184,7 @@ aws ecr list-images --repository-name summarizer-api --region us-east-1
 
 1. Go to **AWS Console** → **RDS** → **Databases** → **Create database**
 2. **Engine:** PostgreSQL
-3. **Version:** 15.4
+3. **Version:** 15.4 (15.18-R2)
 4. **Templates:** Free tier
 5. **DB instance identifier:** `summarizer-prod`
 6. **Master username:** `summarizer`
@@ -195,8 +218,9 @@ Get the DLQ ARN (save it):
 aws sqs get-queue-attributes \
   --queue-url https://sqs.us-east-1.amazonaws.com/123456789/summaries-prod-dlq \
   --attribute-names QueueArn \
-  --region us-east-1
-# Copy the QueueArn value
+  --region us-east-1 \
+  --query 'Attributes.QueueArn' \
+  --output text
 ```
 
 ### 5.2 Create Main Queue with DLQ Policy
@@ -239,8 +263,8 @@ chmod 400 ~/.aws/summarizer-key.pem
 
 ```bash
 aws ec2 run-instances \
-  --image-id ami-0885b1f6bd170450c \
-  --instance-type t2.micro \
+  --image-id ami-0517aaaee33d8b971 \
+  --instance-type t3.micro \
   --key-name summarizer-key \
   --region us-east-1 \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=summarizer-api}]'
@@ -268,7 +292,7 @@ aws ec2 associate-address \
 aws ec2 describe-addresses \
   --allocation-ids $ALLOC \
   --region us-east-1 \
-  --query Addresses[0].PublicIp \
+  --query 'Addresses[0].PublicIp' \
   --output text
 ```
 
@@ -283,6 +307,9 @@ SG=$(aws ec2 describe-instances \
   --region us-east-1 \
   --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
   --output text)
+
+# Test it
+echo "Security Group: $SG"
 ```
 
 Allow HTTP & HTTPS:
@@ -339,7 +366,23 @@ exit
 ssh -i ~/.aws/summarizer-key.pem ec2-user@YOUR_ELASTIC_IP
 ```
 
-### 7.3 Log in to ECR
+### 7.3 Configure AWS Credentials on EC2
+
+The EC2 instance needs AWS credentials to pull from ECR. Configure them:
+
+```bash
+aws configure
+
+# Enter when prompted:
+# AWS Access Key ID: AKIA... (from your downloaded CSV)
+# AWS Secret Access Key: xxxx... (from your downloaded CSV)
+# Default region: us-east-1
+# Default output format: json
+```
+
+**Security note:** For production, use an **IAM role** attached to the EC2 instance instead of storing credentials. But for this dev setup, storing credentials is acceptable.
+
+### 7.4 Log in to ECR
 
 ```bash
 aws ecr get-login-password --region us-east-1 | \
@@ -347,7 +390,7 @@ aws ecr get-login-password --region us-east-1 | \
   123456789.dkr.ecr.us-east-1.amazonaws.com
 ```
 
-### 7.4 Pull Docker Image
+### 7.5 Pull Docker Image
 
 ```bash
 docker pull 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
@@ -355,9 +398,9 @@ docker pull 123456789.dkr.ecr.us-east-1.amazonaws.com/summarizer-api:latest
 
 ---
 
-## Step 8: Configure Environment & Run Containers
+## Step 9: Configure Environment & Run Containers
 
-### 8.1 Create .env for Containers
+### 9.1 Create .env for Containers
 
 Create a file `/home/ec2-user/.env.prod` on the EC2 instance:
 
@@ -392,9 +435,11 @@ RATE_LIMIT_PER_HOUR=20
 FETCH_TIMEOUT_SECONDS=10
 FETCH_MAX_BYTES=2000000
 
-FRONTEND_URL=https://yourdomain.com
+FRONTEND_URL=http://localhost:3000
 EOF
 ```
+
+**Important:** Replace `FRONTEND_URL` with your actual frontend URL after Step 11 (when you deploy to Amplify and get a free domain like `https://dxxxxx.amplifyapp.com`). For now, use `localhost:3000` as a placeholder.
 
 **Get your `APP_KEY`** from your local `.env`:
 ```bash
@@ -402,7 +447,7 @@ EOF
 grep "APP_KEY=" /Users/dmytroodulo/testing/ai-summarizer/api/.env
 ```
 
-### 8.2 Run API Container
+### 9.2 Run API Container
 
 On EC2:
 ```bash
@@ -417,7 +462,7 @@ docker run -d \
 docker logs api
 ```
 
-### 8.3 Run Worker Container
+### 9.3 Run Worker Container
 
 ```bash
 docker run -d \
@@ -431,7 +476,7 @@ docker run -d \
 docker logs worker
 ```
 
-### 8.4 Verify Containers Running
+### 9.4 Verify Containers Running
 
 ```bash
 docker ps
@@ -440,25 +485,44 @@ docker ps
 
 ---
 
-## Step 9: Run Database Migrations
+## Step 10: Create Database and Run Migrations
 
-On EC2:
+### 10.1 Create the Database
+
+On EC2, create the database on your RDS instance:
+
 ```bash
-docker exec api php artisan migrate --force
-docker exec api php artisan db:seed
+PGPASSWORD="YourStrongPassword123!" psql \
+  -h summarizer-prod.ca3isq066nlq.us-east-1.rds.amazonaws.com \
+  -U summarizer \
+  -c "CREATE DATABASE summarizer_prod;"
 ```
 
-Verify:
+Replace:
+- `YourStrongPassword123!` with your actual RDS master password
+- `summarizer-prod.ca3isq066nlq.us-east-1.rds.amazonaws.com` with your actual RDS endpoint
+
+### 10.2 Run Migrations and Seed Data
+
 ```bash
-docker exec api php artisan tinker
-# In tinker:
->>> User::count()
-# Should output: 2 (seeded admin + test users)
+# Run migrations to create tables
+docker exec api php artisan migrate --force
+
+# Seed initial data (admin + test users)
+docker exec api php artisan db:seed --force
+```
+
+### 10.3 Verify
+
+```bash
+# Check user count
+docker exec api php artisan tinker --execute "echo User::count();"
+# Should output: 2 (admin + test users)
 ```
 
 ---
 
-## Step 10: Deploy Frontend to Amplify
+## Step 11: Deploy Frontend to Amplify
 
 ### 10.1 Push Code to GitHub
 
@@ -494,7 +558,7 @@ Go to **Amplify** → **Deployments** → Copy the domain (looks like `dxxxxx.am
 
 ---
 
-## Step 11: Test End-to-End
+## Step 12: Test End-to-End
 
 ### 11.1 Test API directly
 
@@ -529,7 +593,7 @@ docker logs worker --tail 20
 
 ---
 
-## Step 12: Set Up Domain (Optional)
+## Step 13: Set Up Domain (Optional)
 
 If you want a custom domain instead of elastic IP:
 
@@ -570,6 +634,48 @@ aws cloudwatch put-metric-alarm \
 ---
 
 ## Troubleshooting
+
+### SSH connection timeout
+
+**Error:**
+```
+ssh: connect to host 34.198.172.110 port 22: Operation timed out
+```
+
+**Solution:**
+1. **Wait longer** — EC2 instances take 1–2 minutes to fully boot. Wait 2–3 minutes and try again:
+```bash
+sleep 120
+ssh -i ~/.aws/summarizer-key.pem ec2-user@YOUR_ELASTIC_IP
+```
+
+2. **Allow SSH in security group** — If timeout persists, SSH may be blocked:
+```bash
+# Get security group ID
+SG=$(aws ec2 describe-instances \
+  --instance-ids i-xxxxx \
+  --region us-east-1 \
+  --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+  --output text)
+
+# Allow SSH (port 22)
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG \
+  --protocol tcp \
+  --port 22 \
+  --cidr 0.0.0.0/0 \
+  --region us-east-1
+
+# Try SSH again
+ssh -i ~/.aws/summarizer-key.pem ec2-user@YOUR_ELASTIC_IP
+```
+
+3. **Verify key permissions** — The key file must have restrictive permissions:
+```bash
+chmod 400 ~/.aws/summarizer-key.pem
+```
+
+---
 
 ### API not responding (port 8000)
 
