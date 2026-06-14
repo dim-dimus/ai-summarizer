@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type { Summary } from "@/lib/types";
@@ -10,9 +10,18 @@ import { StatusBadge } from "@/components/StatusBadge";
 
 const POLL_MS = 2000;
 
+// useSearchParams must be inside a Suspense boundary for static export.
 export default function SummaryDetailPage() {
-  const params = useParams<{ id: string }>();
-  const id = Number(params.id);
+  return (
+    <Suspense fallback={null}>
+      <SummaryDetail />
+    </Suspense>
+  );
+}
+
+function SummaryDetail() {
+  const searchParams = useSearchParams();
+  const id = Number(searchParams.get("id"));
   const { user, loading } = useAuth();
   const router = useRouter();
   const [summary, setSummary] = useState<Summary | null>(null);

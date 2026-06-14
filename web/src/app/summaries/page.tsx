@@ -224,7 +224,7 @@ function SummaryRow({
 
   return (
     <li className="flex items-center justify-between gap-4 py-3">
-      <Link href={`/summaries/${summary.id}`} className="min-w-0 flex-1">
+      <Link href={`/summaries/view?id=${summary.id}`} className="min-w-0 flex-1">
         <span className="block truncate font-medium">
           {summary.title ?? summary.source_url ?? `Summary #${summary.id}`}
         </span>

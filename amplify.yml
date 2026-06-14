@@ -13,8 +13,8 @@ applications:
           commands:
             - npm run build
       artifacts:
-        # Next.js SSR output lives in .next (relative to appRoot).
-        baseDirectory: .next
+        # Static export output (output: "export") lives in out/ (relative to appRoot).
+        baseDirectory: out
         files:
           - '**/*'
       cache:
