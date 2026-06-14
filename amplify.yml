@@ -1,0 +1,23 @@
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            # Next.js 16 requires Node 20+. Amplify's default may be older.
+            - nvm install 20
+            - nvm use 20
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        # Next.js SSR output lives in .next (relative to appRoot).
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*
